@@ -1,0 +1,98 @@
+name: Publish Windows release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag in the private source repository, for example v0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 180
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      RELEASE_REPOSITORY: ${{ github.repository }}
+      VELOREN_USERDATA_STRATEGY: executable
+    steps:
+      - name: Validate release version
+        shell: pwsh
+        run: |
+          if ($env:RELEASE_TAG -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
+            throw 'Use a version tag such as v0.1.0.'
+          }
+
+      - name: Checkout tagged source with Git LFS assets
+        uses: actions/checkout@v4
+        with:
+          repository: Carbneth/Velo-DojoTR
+          ref: refs/tags/${{ inputs.tag }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          lfs: true
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check public source archive contents
+        shell: pwsh
+        run: |
+          $paths = git ls-files
+          if ($LASTEXITCODE -ne 0) { throw 'Could not list tracked files.' }
+          $sensitive = $paths | Where-Object { $_ -match '(^|/)(userdata|accounts\.db|\.env(\..*)?|[^/]*\.(p12|pfx|key))($|/)' }
+          if ($sensitive) { throw "Remove sensitive files before release: $($sensitive -join ', ')" }
+          $lfsFiles = git lfs ls-files --name-only
+          if ($LASTEXITCODE -ne 0) { throw 'Could not list Git LFS files.' }
+          foreach ($file in $lfsFiles) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing LFS file: $file" }
+            $stream = [System.IO.File]::OpenRead((Join-Path $PWD $file))
+            try {
+              $header = [byte[]]::new(42)
+              $count = $stream.Read($header, 0, $header.Length)
+              $prefix = [System.Text.Encoding]::ASCII.GetString($header, 0, $count)
+              if ($prefix.StartsWith('version https://git-lfs.github.com/spec/v1')) { throw "Unresolved LFS pointer: $file" }
+            } finally { $stream.Dispose() }
+          }
+
+      - name: Archive corresponding source
+        shell: pwsh
+        run: |
+          tar.exe -a -cf "$env:RUNNER_TEMP/Velo-DojoTR-source.zip" --exclude=.git --exclude=.agent --exclude=target .
+          if ($LASTEXITCODE -ne 0) { throw 'Source archive failed.' }
+
+      - name: Build Windows client
+        shell: pwsh
+        run: |
+          cargo build --release --locked -p veloren-voxygen --no-default-features --features default-publish
+          if ($LASTEXITCODE -ne 0) { throw 'Client build failed.' }
+
+      - name: Package client and update metadata
+        shell: pwsh
+        run: |
+          $package = Join-Path $env:RUNNER_TEMP 'client'
+          New-Item -ItemType Directory -Path $package | Out-Null
+          Copy-Item -Recurse assets (Join-Path $package 'assets')
+          Copy-Item LICENSE (Join-Path $package 'LICENSE')
+          Copy-Item target/release/veloren-voxygen.exe (Join-Path $package 'Velo-DojoTR.exe')
+          tar.exe -a -cf "$env:RUNNER_TEMP/Velo-DojoTR-Windows.zip" -C $package assets LICENSE Velo-DojoTR.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Client archive failed.' }
+          $hash = (Get-FileHash "$env:RUNNER_TEMP/Velo-DojoTR-Windows.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
+          $metadata = @{
+            version = $env:RELEASE_TAG
+            source_commit = (git rev-parse HEAD)
+            windows_url = "https://github.com/$env:RELEASE_REPOSITORY/releases/download/$env:RELEASE_TAG/Velo-DojoTR-Windows.zip"
+            windows_sha256 = $hash
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Could not identify source commit.' }
+          $metadata | ConvertTo-Json | Set-Content -Encoding utf8 "$env:RUNNER_TEMP/update.json"
+
+      - name: Publish release and corresponding source
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:RELEASE_TAG --repo $env:RELEASE_REPOSITORY --title $env:RELEASE_TAG --notes 'Windows client and corresponding source.' "$env:RUNNER_TEMP/Velo-DojoTR-Windows.zip" "$env:RUNNER_TEMP/Velo-DojoTR-source.zip" "$env:RUNNER_TEMP/update.json"
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed.' }
