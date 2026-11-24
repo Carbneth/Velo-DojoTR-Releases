@@ -94,5 +94,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create $env:RELEASE_TAG --repo $env:RELEASE_REPOSITORY --title $env:RELEASE_TAG --notes 'Windows client and corresponding source.' "$env:RUNNER_TEMP/Velo-DojoTR-Windows.zip" "$env:RUNNER_TEMP/Velo-DojoTR-source.zip" "$env:RUNNER_TEMP/update.json"
+          gh release create $env:RELEASE_TAG --repo $env:RELEASE_REPOSITORY --draft --title $env:RELEASE_TAG --notes 'Windows client and corresponding source.' "$env:RUNNER_TEMP/Velo-DojoTR-Windows.zip" "$env:RUNNER_TEMP/Velo-DojoTR-source.zip" "$env:RUNNER_TEMP/update.json"
+          if ($LASTEXITCODE -ne 0) { throw 'Draft release creation failed.' }
+          gh release edit $env:RELEASE_TAG --repo $env:RELEASE_REPOSITORY --draft=false
           if ($LASTEXITCODE -ne 0) { throw 'Release publication failed.' }
