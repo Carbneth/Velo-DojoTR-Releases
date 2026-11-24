@@ -69,6 +69,17 @@ jobs:
           cargo build --release --locked -p veloren-voxygen --no-default-features --features default-publish
           if ($LASTEXITCODE -ne 0) { throw 'Client build failed.' }
 
+      - name: Set up .NET for launcher
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build standalone launcher
+        shell: pwsh
+        run: |
+          dotnet publish launcher/Launcher.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o "$env:RUNNER_TEMP/launcher"
+          if ($LASTEXITCODE -ne 0) { throw 'Launcher build failed.' }
+
       - name: Package client and update metadata
         shell: pwsh
         run: |
@@ -87,14 +98,37 @@ jobs:
             windows_sha256 = $hash
           }
           if ($LASTEXITCODE -ne 0) { throw 'Could not identify source commit.' }
-          $metadata | ConvertTo-Json | Set-Content -Encoding utf8 "$env:RUNNER_TEMP/update.json"
+          $json = $metadata | ConvertTo-Json -Compress
+          [System.IO.File]::WriteAllText("$env:RUNNER_TEMP/update.json", $json, [System.Text.UTF8Encoding]::new($false))
+
+      - name: Sign update metadata
+        shell: pwsh
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          if (-not $env:UPDATE_SIGNING_KEY) { throw 'Missing update signing key.' }
+          $data = [System.IO.File]::ReadAllBytes("$env:RUNNER_TEMP/update.json")
+          $signer = [System.Security.Cryptography.RSA]::Create()
+          $verifier = [System.Security.Cryptography.RSA]::Create()
+          try {
+            $signer.ImportFromPem($env:UPDATE_SIGNING_KEY)
+            $verifier.ImportFromPem((Get-Content -Raw launcher/update-public.pem))
+            $hash = [System.Security.Cryptography.HashAlgorithmName]::SHA256
+            $padding = [System.Security.Cryptography.RSASignaturePadding]::Pkcs1
+            $signature = $signer.SignData($data, $hash, $padding)
+            if (-not $verifier.VerifyData($data, $signature, $hash, $padding)) { throw 'Signing key does not match launcher public key.' }
+            [System.IO.File]::WriteAllBytes("$env:RUNNER_TEMP/update.sig", $signature)
+          } finally {
+            $signer.Dispose()
+            $verifier.Dispose()
+          }
 
       - name: Publish release and corresponding source
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create $env:RELEASE_TAG --repo $env:RELEASE_REPOSITORY --draft --title $env:RELEASE_TAG --notes 'Windows client and corresponding source.' "$env:RUNNER_TEMP/Velo-DojoTR-Windows.zip" "$env:RUNNER_TEMP/Velo-DojoTR-source.zip" "$env:RUNNER_TEMP/update.json"
+          gh release create $env:RELEASE_TAG --repo $env:RELEASE_REPOSITORY --draft --title $env:RELEASE_TAG --notes 'Windows client and corresponding source.' "$env:RUNNER_TEMP/Velo-DojoTR-Windows.zip" "$env:RUNNER_TEMP/Velo-DojoTR-source.zip" "$env:RUNNER_TEMP/update.json" "$env:RUNNER_TEMP/update.sig" "$env:RUNNER_TEMP/launcher/Velo-DojoTR-Launcher.exe"
           if ($LASTEXITCODE -ne 0) { throw 'Draft release creation failed.' }
           gh release edit $env:RELEASE_TAG --repo $env:RELEASE_REPOSITORY --draft=false
           if ($LASTEXITCODE -ne 0) { throw 'Release publication failed.' }
