@@ -33,7 +33,7 @@ jobs:
       - name: Checkout tagged source with Git LFS assets
         uses: actions/checkout@v4
         with:
-          repository: Carbneth/Velo-DojoTR
+          repository: Carbneth/kozova
           ref: refs/tags/${{ inputs.tag || github.ref_name }}
           ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
           lfs: true
